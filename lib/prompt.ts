@@ -1,4 +1,4 @@
-import type { FilterConfig, PostData } from './types';
+import type { FilterConfig, LabeledCriterion, PostData } from './types';
 import { CATEGORIES } from './categories';
 
 /** JSON schema constraining the model's output to a binary verdict + reason. */
@@ -40,17 +40,32 @@ export const BATCH_VERDICT_SCHEMA = {
   required: ['results'],
 } as const;
 
-/** Collect the active criteria (enabled categories + non-empty rules). */
-export function activeCriteria(config: FilterConfig): string[] {
-  const criteria: string[] = [];
+/**
+ * Collect the active criteria (enabled categories + non-empty rules), each with
+ * a short label. Providers that judge one criterion at a time (Jev) need the
+ * label to name the matched rule in the hide reason.
+ */
+export function activeCriteriaLabeled(config: FilterConfig): LabeledCriterion[] {
+  const criteria: LabeledCriterion[] = [];
   for (const cat of CATEGORIES) {
-    if (config.categories[cat.id]) criteria.push(cat.description);
+    if (!config.categories[cat.id]) continue;
+    criteria.push({
+      label: cat.label,
+      description: cat.description,
+      matchesWhen: cat.matchesWhen,
+      notMatchesWhen: cat.notMatchesWhen,
+    });
   }
   for (const rule of config.rules) {
     const r = rule.trim();
-    if (r) criteria.push(r);
+    if (r) criteria.push({ label: r, description: r });
   }
   return criteria;
+}
+
+/** Collect the active criteria (enabled categories + non-empty rules). */
+export function activeCriteria(config: FilterConfig): string[] {
+  return activeCriteriaLabeled(config).map((c) => c.description);
 }
 
 export function buildSystemPrompt(config: FilterConfig): string {

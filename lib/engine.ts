@@ -18,6 +18,13 @@ function engagementRate(m: PostMetrics): number | null {
 const ENGAGEMENT_MIX = { likes: 0.6, reposts: 0.22, replies: 0.18 } as const;
 type EngagementKey = keyof typeof ENGAGEMENT_MIX;
 
+/** Metric names as the engagement tooltip prints them. */
+const METRIC_LABELS: Record<EngagementKey, string> = {
+  likes: '点赞',
+  replies: '回复',
+  reposts: '转推',
+};
+
 /**
  * Which of likes/replies/reposts is disproportionately high for this post — the
  * metric whose share of total engagement most exceeds the typical mix — or null
@@ -124,11 +131,11 @@ export function startEngine() {
     erApplied.set(node, key);
     const high = rate >= threshold;
     const detail =
-      `${formatCount(metrics.likes)} likes · ${formatCount(metrics.replies)} replies · ` +
-      `${formatCount(metrics.reposts)} reposts · ${formatCount(metrics.views)} views` +
+      `${formatCount(metrics.likes)} 点赞 · ${formatCount(metrics.replies)} 回复 · ` +
+      `${formatCount(metrics.reposts)} 转推 · ${formatCount(metrics.views)} 浏览` +
       ` → ${rate.toFixed(2)}%` +
-      (high ? ` (hot ≥ ${threshold}%)` : '');
-    adapter!.annotateEngagement(node, rate, high, detail, standout);
+      (high ? `（热门 ≥ ${threshold}%）` : '');
+    adapter!.annotateEngagement(node, rate, high, detail, standout && METRIC_LABELS[standout]);
   };
 
   // Threads that have been hidden, remembered per-node so late-loading siblings
@@ -152,10 +159,11 @@ export function startEngine() {
     shortWhy: string,
     detail: string,
     confidence?: number,
+    title?: string,
   ) => {
     const thread = adapter!.findThread(node);
     for (const n of thread) {
-      adapter!.collapse(n, shortWhy);
+      adapter!.collapse(n, shortWhy, title);
       markThreadHidden(n, shortWhy, confidence);
       if (n === node) {
         debug(n, `✕ ${shortWhy}`, 'hidden', detail, confidence);
@@ -171,9 +179,9 @@ export function startEngine() {
         }
         debug(
           n,
-          '✕ thread',
+          '✕ 同一推文串',
           'hidden',
-          `Hidden because another post in this thread matched: ${shortWhy}`,
+          `同一推文串里另一条命中规则，整串一起折叠：${shortWhy}`,
           confidence,
         );
       }
@@ -201,14 +209,14 @@ export function startEngine() {
       return true;
     }
 
-    const shortWhy = `low ER < ${threshold}%`;
+    const shortWhy = `互动率低于 ${threshold}%`;
     const detail =
-      `Hidden — engagement rate ${rate.toFixed(2)}% is below your ${threshold}% minimum ` +
-      `(${formatCount(metrics.likes)} likes · ${formatCount(metrics.replies)} replies · ` +
-      `${formatCount(metrics.reposts)} reposts · ${formatCount(metrics.views)} views).`;
+      `已折叠 — 互动率 ${rate.toFixed(2)}% 低于你设的 ${threshold}% 下限` +
+      `（${formatCount(metrics.likes)} 点赞 · ${formatCount(metrics.replies)} 回复 · ` +
+      `${formatCount(metrics.reposts)} 转推 · ${formatCount(metrics.views)} 浏览）。`;
     const d: Decision = { kind: 'hide', reason: shortWhy, confidence: 100 };
     decisions.set(post.id, d);
-    hideThread(node, shortWhy, detail, 100);
+    hideThread(node, shortWhy, detail, 100, '互动率过低 · 已折叠');
     return true;
   };
 
@@ -219,15 +227,15 @@ export function startEngine() {
     if (thread.length < 2) return null;
     const hiddenSib = thread.find((n) => n !== node && threadHidden.has(n));
     if (!hiddenSib) return null;
-    const why = threadReason.get(hiddenSib) ?? 'another post in this thread matched';
+    const why = threadReason.get(hiddenSib) ?? '同一推文串里另一条命中规则';
     const confidence = threadConfidence.get(hiddenSib);
     adapter!.collapse(node, why);
     markThreadHidden(node, why, confidence);
     debug(
       node,
-      '✕ thread',
+      '✕ 同一推文串',
       'hidden',
-      `Hidden because another post in this thread matched: ${why}`,
+      `同一推文串里另一条命中规则，整串一起折叠：${why}`,
       confidence,
     );
     return why;
@@ -237,29 +245,29 @@ export function startEngine() {
   const applyDecision = (node: HTMLElement, d: Decision) => {
     if (d.kind === 'hide') {
       const confNote =
-        d.confidence > 0 ? ` (${d.confidence}% confidence)` : '';
+        d.confidence > 0 ? `（置信度 ${d.confidence}%）` : '';
       hideThread(
         node,
         d.reason,
-        `Hidden${confNote} — the model said: ${d.reason}`,
+        `已折叠${confNote} — 模型判定：${d.reason}`,
         d.confidence || undefined,
       );
     } else if (d.kind === 'block') {
-      adapter!.collapse(node, `author @${d.author}`);
+      adapter!.collapse(node, `屏蔽作者 @${d.author}`, '已屏蔽作者 · 已折叠');
       debug(
         node,
-        `⛔ blocked @${d.author}`,
+        `⛔ 已屏蔽 @${d.author}`,
         'blocked',
-        `Hidden because @${d.author} is on your blocked-authors list (no LLM involved).`,
+        `@${d.author} 在你的屏蔽作者名单里，直接折叠（不走模型）。`,
       );
     } else {
       const confNote =
-        d.confidence > 0 ? ` (${d.confidence}% confidence)` : '';
+        d.confidence > 0 ? `（置信度 ${d.confidence}%）` : '';
       debug(
         node,
-        '✓ kept',
+        '✓ 保留',
         'kept',
-        `Kept${confNote} — the model said: ${d.reason}`,
+        `已保留${confNote} — 模型判定：${d.reason}`,
         d.confidence || undefined,
       );
     }
@@ -305,6 +313,18 @@ export function startEngine() {
     if (flushTimer == null) flushTimer = setTimeout(flushNow, BATCH_DEBOUNCE_MS);
   }
 
+  // Jev judges structured state rather than a prompt, so it gets the extra
+  // signals the adapter already exposes (engagement counts, thread context).
+  // The prompt-based providers only read author/text, so skip the DOM work.
+  const enrich = (node: HTMLElement, post: PostData): PostData =>
+    config.provider === 'jev'
+      ? {
+          ...post,
+          metrics: adapter!.extractMetrics(node) ?? undefined,
+          inThread: adapter!.findThread(node).length > 1,
+        }
+      : post;
+
   // Request a verdict for a post via the batch queue. Returns null on error
   // (fail open). Dedupes concurrent requests for the same post id.
   const requestVerdict = (post: PostData): Promise<Verdict | null> => {
@@ -328,7 +348,7 @@ export function startEngine() {
     if (!post) {
       if (applied.get(node) === stamp(NO_POST)) return;
       applied.set(node, stamp(NO_POST));
-      debug(node, '? no post data', 'skipped', 'Could not extract text/author from this node — likely not a real post, or the DOM layout changed.');
+      debug(node, '? 无法解析', 'skipped', '没能从这个节点里取出正文/作者 — 可能不是真的推文，或者 X 的 DOM 变了。');
       return;
     }
 
@@ -383,7 +403,7 @@ export function startEngine() {
       config.rules.some((r) => r.trim()) || Object.values(config.categories).some(Boolean);
     if (!hasLlmFilters) {
       applied.set(node, stamp(post.id));
-      debug(node, '— no active filters', 'skipped', 'Kept because no categories or custom rules are enabled — there is nothing to match against. Turn some on in the popup.');
+      debug(node, '— 未启用过滤', 'skipped', '没有启用任何预设话题或自定义规则，没东西可匹配，直接保留。去设置页打开几个。');
       return;
     }
 
@@ -393,9 +413,9 @@ export function startEngine() {
     applied.set(node, stamp(post.id));
 
     // Classify via the batch queue (dedupes by post id under the hood).
-    debug(node, '… classifying', 'pending', 'Sent to the model — waiting for a verdict.');
+    debug(node, '… 判定中', 'pending', '已发给模型 — 等待判定结果。');
     const requestGen = gen;
-    const verdict = await requestVerdict(post);
+    const verdict = await requestVerdict(enrich(node, post));
 
     // Config changed while we waited — this verdict is stale; a re-scan will
     // re-evaluate under the new generation (the stamp above is now outdated).
@@ -403,18 +423,18 @@ export function startEngine() {
     if (!verdict) {
       // Fail open and allow a later retry.
       applied.delete(node);
-      debug(node, '⚠ classify error', 'skipped', 'Kept (fail-open) because classification errored.');
+      debug(node, '⚠ 判定失败', 'skipped', '判定出错，按 fail-open 保留这条。');
       return;
     }
     const decision: Decision = verdict.hide
       ? {
           kind: 'hide',
-          reason: verdict.reason || 'matched a filter',
+          reason: verdict.reason || '命中了某条规则',
           confidence: verdict.confidence,
         }
       : {
           kind: 'keep',
-          reason: verdict.reason || 'did not match any active filter',
+          reason: verdict.reason || '未命中任何启用的规则',
           confidence: verdict.confidence,
         };
     decisions.set(post.id, decision);
@@ -455,6 +475,9 @@ export function startEngine() {
       apiBaseUrl: c.apiBaseUrl,
       apiKey: c.apiKey,
       apiModel: c.apiModel,
+      jevApiKey: c.jevApiKey,
+      jevBaseUrl: c.jevBaseUrl,
+      jevThreshold: c.jevThreshold,
     });
 
   filterConfig.watch((raw) => {

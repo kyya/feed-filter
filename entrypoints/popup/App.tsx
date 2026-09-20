@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { filterConfig, normalizeConfig } from '@/lib/storage';
 import { CATEGORIES } from '@/lib/categories';
+import { DEFAULT_JEV_BASE_URL, JEV_MODEL, jevEndpoint, normalizeThreshold } from '@/lib/jev';
 import type { FilterConfig, Provider } from '@/lib/types';
 import './App.css';
 
@@ -11,11 +12,11 @@ type Tab = 'topics' | 'rules' | 'authors' | 'engagement' | 'model';
 const EXPECTED = [{ type: 'text' as const, languages: ['en'] }];
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: 'topics', label: 'Topics' },
-  { id: 'rules', label: 'Rules' },
-  { id: 'authors', label: 'Authors' },
-  { id: 'engagement', label: 'Engagement' },
-  { id: 'model', label: 'Classifier' },
+  { id: 'topics', label: '话题' },
+  { id: 'rules', label: '规则' },
+  { id: 'authors', label: '作者' },
+  { id: 'engagement', label: '互动' },
+  { id: 'model', label: '分类器' },
 ];
 
 /** Fill in provider fields missing from older stored configs. */
@@ -156,7 +157,7 @@ function App() {
     if (!url) return;
     const ok = await ensureHostPermission(url);
     if (!ok) {
-      setApiError('Host permission denied — API mode needs access to this endpoint.');
+      setApiError('主机权限被拒 — API 模式需要访问该端点。');
       setApiTest('error');
       return;
     }
@@ -169,13 +170,13 @@ function App() {
     const key = config.apiKey.trim();
     const modelName = config.apiModel.trim();
     if (!base || !key || !modelName) {
-      setApiError('Fill in base URL, API key, and model first.');
+      setApiError('请先填写 Base URL、API Key 和模型名。');
       setApiTest('error');
       return;
     }
     const granted = await ensureHostPermission(base);
     if (!granted) {
-      setApiError('Host permission denied — cannot reach this endpoint.');
+      setApiError('主机权限被拒 — 无法访问该端点。');
       setApiTest('error');
       return;
     }
@@ -211,7 +212,41 @@ function App() {
       setApiTest('ok');
     } catch (err) {
       setApiTest('error');
-      setApiError(err instanceof Error ? err.message : 'Request failed');
+      setApiError(err instanceof Error ? err.message : '请求失败');
+    }
+  }
+
+  async function testJev() {
+    if (!config) return;
+    const key = config.jevApiKey.trim();
+    if (!key) {
+      setApiError('请先填写 TypeSafe API Key。');
+      setApiTest('error');
+      return;
+    }
+    setApiTest('testing');
+    setApiError('');
+    try {
+      const res = await fetch(jevEndpoint(config.jevBaseUrl), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          state: 'Just shipped a small rewrite of our build pipeline.',
+          model: JEV_MODEL,
+          questions: { ping: { type: 'noul', instructions: 'Is this post about software?' } },
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`${res.status}: ${body.slice(0, 120)}`);
+      }
+      setApiTest('ok');
+    } catch (err) {
+      setApiTest('error');
+      setApiError(err instanceof Error ? err.message : '请求失败');
     }
   }
 
@@ -233,7 +268,7 @@ function App() {
     setNewAuthor('');
   }
 
-  if (!config) return <div className="app app-loading">Loading…</div>;
+  if (!config) return <div className="app app-loading">加载中…</div>;
 
   const provider = config.provider ?? 'on-device';
   const activeCats = CATEGORIES.filter((c) => config.categories[c.id]).length;
@@ -255,7 +290,7 @@ function App() {
     <div className={`app${config.enabled ? ' app-live' : ''}`}>
       <header className="header">
         <div className="brand">
-          <span className="brand-mark">X · local filter</span>
+          <span className="brand-mark">X · 中文时间线过滤</span>
           <h1>Feed Filter</h1>
         </div>
         <label className="switch header-switch">
@@ -263,22 +298,22 @@ function App() {
             type="checkbox"
             checked={config.enabled}
             onChange={(e) => update({ enabled: e.target.checked })}
-            aria-label={config.enabled ? 'Filtering on' : 'Filtering off'}
+            aria-label={config.enabled ? '过滤已开启' : '过滤已关闭'}
           />
           <span className="switch-track" aria-hidden="true">
             <span className="switch-thumb" />
           </span>
-          <span className="switch-label">{config.enabled ? 'Live' : 'Off'}</span>
+          <span className="switch-label">{config.enabled ? '运行中' : '已关闭'}</span>
         </label>
       </header>
       <p className="tagline">
         {config.enabled
-          ? 'Cutting noise from your timeline as you scroll.'
-          : 'Turn on to start cutting noise from your timeline.'}
+          ? '你边刷，它边把噪音从时间线里折掉。'
+          : '打开开关，开始清理时间线里的噪音。'}
       </p>
 
       <div className="shell">
-        <nav className="rail" role="tablist" aria-label="Settings sections">
+        <nav className="rail" role="tablist" aria-label="设置分类">
           {TABS.map((t) => (
             <button
               key={t.id}
@@ -300,10 +335,10 @@ function App() {
           {tab === 'topics' && (
             <div className="panel-pane" role="tabpanel" id="panel-topics" aria-labelledby="tab-topics">
               <div className="panel-head">
-                <h2>Redact topics</h2>
-                <p className="panel-desc">Pick what the model should scrub from your timeline.</p>
+                <h2>屏蔽话题</h2>
+                <p className="panel-desc">勾选要让模型从时间线里清掉的内容。</p>
               </div>
-              <div className="chips" role="group" aria-label="Topics to hide">
+              <div className="chips" role="group" aria-label="要折叠的话题">
                 {CATEGORIES.map((cat) => {
                   const active = !!config.categories[cat.id];
                   return (
@@ -326,18 +361,18 @@ function App() {
           {tab === 'rules' && (
             <div className="panel-pane" role="tabpanel" id="panel-rules" aria-labelledby="tab-rules">
               <div className="panel-head">
-                <h2>Custom rules</h2>
-                <p className="panel-desc">Plain-language rules the model judges each post against.</p>
+                <h2>自定义规则</h2>
+                <p className="panel-desc">用大白话写规则，模型逐条拿推文去对。</p>
               </div>
               <div className="row">
                 <input
                   value={newRule}
-                  placeholder="e.g. AI hype threads"
+                  placeholder="例如：AI 吹嘘长串"
                   onChange={(e) => setNewRule(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && addRule()}
                 />
                 <button type="button" className="add" onClick={addRule}>
-                  Add
+                  添加
                 </button>
               </div>
               <ul className="list list-scroll">
@@ -347,7 +382,7 @@ function App() {
                     <button
                       type="button"
                       className="remove"
-                      aria-label={`Remove rule: ${rule}`}
+                      aria-label={`删除规则：${rule}`}
                       onClick={() => update({ rules: config.rules.filter((_, j) => j !== i) })}
                     >
                       ×
@@ -355,7 +390,7 @@ function App() {
                   </li>
                 ))}
                 {config.rules.length === 0 && (
-                  <li className="empty">Write a rule in plain language to hide matching posts.</li>
+                  <li className="empty">用一句话写条规则，命中的推文会被折叠。</li>
                 )}
               </ul>
             </div>
@@ -364,8 +399,8 @@ function App() {
           {tab === 'authors' && (
             <div className="panel-pane" role="tabpanel" id="panel-authors" aria-labelledby="tab-authors">
               <div className="panel-head">
-                <h2>Blocked authors</h2>
-                <p className="panel-desc">Hidden deterministically — no model needed.</p>
+                <h2>屏蔽作者</h2>
+                <p className="panel-desc">按名单直接折叠 — 不走模型。</p>
               </div>
               <div className="row">
                 <input
@@ -375,7 +410,7 @@ function App() {
                   onKeyDown={(e) => e.key === 'Enter' && addAuthor()}
                 />
                 <button type="button" className="add" onClick={addAuthor}>
-                  Add
+                  添加
                 </button>
               </div>
               <ul className="list list-scroll">
@@ -385,7 +420,7 @@ function App() {
                     <button
                       type="button"
                       className="remove"
-                      aria-label={`Unblock @${h}`}
+                      aria-label={`取消屏蔽 @${h}`}
                       onClick={() => update({ blockedAuthors: config.blockedAuthors.filter((_, j) => j !== i) })}
                     >
                       ×
@@ -393,7 +428,7 @@ function App() {
                   </li>
                 ))}
                 {config.blockedAuthors.length === 0 && (
-                  <li className="empty">Add a handle to hide every post from that account.</li>
+                  <li className="empty">添加一个 handle，该账号的推文全部折叠。</li>
                 )}
               </ul>
             </div>
@@ -402,8 +437,8 @@ function App() {
           {tab === 'engagement' && (
             <div className="panel-pane" role="tabpanel" id="panel-engagement" aria-labelledby="tab-engagement">
               <div className="panel-head">
-                <h2>Engagement</h2>
-                <p className="panel-desc">(likes + replies + reposts) ÷ views.</p>
+                <h2>互动率</h2>
+                <p className="panel-desc">（点赞 + 回复 + 转推）÷ 浏览量。</p>
               </div>
               <div className="footer-toggle engagement-toggle">
                 <label className="switch">
@@ -411,16 +446,16 @@ function App() {
                     type="checkbox"
                     checked={config.showEngagement}
                     onChange={(e) => update({ showEngagement: e.target.checked })}
-                    aria-label="Show engagement rates"
+                    aria-label="显示互动率"
                   />
                   <span className="switch-track" aria-hidden="true">
                     <span className="switch-thumb" />
                   </span>
-                  <span className="switch-label">Show engagement rates</span>
+                  <span className="switch-label">显示互动率</span>
                 </label>
               </div>
               <label className={`field${config.showEngagement ? '' : ' field-disabled'}`}>
-                <span className="field-label">High threshold %</span>
+                <span className="field-label">高互动阈值 %</span>
                 <input
                   type="number"
                   min={0.1}
@@ -434,7 +469,7 @@ function App() {
                   }}
                 />
               </label>
-              <p className="hint hint-inline">Posts at or above the threshold get a Hot badge.</p>
+              <p className="hint hint-inline">达到或超过阈值的推文会带上 Hot 徽章。</p>
 
               <div className="footer-toggle engagement-toggle">
                 <label className="switch">
@@ -442,16 +477,16 @@ function App() {
                     type="checkbox"
                     checked={config.hideLowEngagement}
                     onChange={(e) => update({ hideLowEngagement: e.target.checked })}
-                    aria-label="Hide low engagement"
+                    aria-label="折叠低互动推文"
                   />
                   <span className="switch-track" aria-hidden="true">
                     <span className="switch-thumb" />
                   </span>
-                  <span className="switch-label">Hide low engagement</span>
+                  <span className="switch-label">折叠低互动推文</span>
                 </label>
               </div>
               <label className={`field${config.hideLowEngagement ? '' : ' field-disabled'}`}>
-                <span className="field-label">Min engagement %</span>
+                <span className="field-label">最低互动率 %</span>
                 <input
                   type="number"
                   min={0}
@@ -465,24 +500,24 @@ function App() {
                   }}
                 />
               </label>
-              <p className="hint hint-inline">Posts below this rate are hidden once view counts load.</p>
+              <p className="hint hint-inline">浏览量加载出来后，低于该比例的推文会被折叠。</p>
             </div>
           )}
 
           {tab === 'model' && (
             <div className="panel-pane" role="tabpanel" id="panel-model" aria-labelledby="tab-model">
               <div className="panel-head">
-                <h2>Classifier</h2>
-                <p className="panel-desc">Choose what judges each post.</p>
+                <h2>分类器</h2>
+                <p className="panel-desc">选择由谁来判定每条推文。</p>
               </div>
-              <div className="segment" role="group" aria-label="Classifier backend">
+              <div className="segment" role="group" aria-label="分类器后端">
                 <button
                   type="button"
                   className={provider === 'on-device' ? 'segment-btn segment-on' : 'segment-btn'}
                   aria-pressed={provider === 'on-device'}
                   onClick={() => setProvider('on-device')}
                 >
-                  On-device
+                  本机模型
                 </button>
                 <button
                   type="button"
@@ -492,11 +527,82 @@ function App() {
                 >
                   API
                 </button>
+                <button
+                  type="button"
+                  className={provider === 'jev' ? 'segment-btn segment-on' : 'segment-btn'}
+                  aria-pressed={provider === 'jev'}
+                  onClick={() => setProvider('jev')}
+                >
+                  TypeSafe Jev
+                </button>
               </div>
 
               {provider === 'on-device' ? (
                 <div className="model-panel">
                   <ModelBanner model={model} progress={progress} onDownload={downloadModel} />
+                </div>
+              ) : provider === 'jev' ? (
+                <div className="model-panel fields">
+                  <label className="field">
+                    <span className="field-label">API Key</span>
+                    <input
+                      type="password"
+                      value={config.jevApiKey}
+                      placeholder="TypeSafe API Key"
+                      onChange={(e) => update({ jevApiKey: e.target.value })}
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="field-label">Base URL（可选）</span>
+                    <input
+                      value={config.jevBaseUrl}
+                      placeholder={DEFAULT_JEV_BASE_URL}
+                      onChange={(e) => update({ jevBaseUrl: e.target.value })}
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                  </label>
+                  <label className="field field-range">
+                    <span className="field-label">
+                      折叠阈值
+                      <span className="field-value">{config.jevThreshold.toFixed(2)}</span>
+                    </span>
+                    <input
+                      type="range"
+                      min={0.4}
+                      max={0.95}
+                      step={0.05}
+                      value={config.jevThreshold}
+                      onChange={(e) => {
+                        const n = parseFloat(e.target.value);
+                        if (!Number.isFinite(n)) return;
+                        update({ jevThreshold: normalizeThreshold(n) });
+                      }}
+                    />
+                  </label>
+                  <p className="hint hint-inline">
+                    每条规则会变成一个是/否问题；任一规则的概率达到阈值就折叠这条推文。
+                    正文不足 20 个字符的推文直接保留，不发请求。改 Base URL 还需要同步改
+                    manifest 的 host_permissions。API Key 以明文存在浏览器本地。
+                  </p>
+                  <div className="api-actions">
+                    <button
+                      type="button"
+                      className="add add-compact"
+                      onClick={() => void testJev()}
+                      disabled={apiTest === 'testing'}
+                    >
+                      {apiTest === 'testing' ? '测试中…' : '测试连接'}
+                    </button>
+                    {apiTest === 'ok' && <span className="api-status api-ok">已连通</span>}
+                    {apiTest === 'error' && (
+                      <span className="api-status api-err" title={apiError}>
+                        {apiError || '失败'}
+                      </span>
+                    )}
+                  </div>
                 </div>
               ) : (
                 <div className="model-panel fields">
@@ -512,7 +618,7 @@ function App() {
                     />
                   </label>
                   <label className="field">
-                    <span className="field-label">API key</span>
+                    <span className="field-label">API Key</span>
                     <input
                       type="password"
                       value={config.apiKey}
@@ -523,7 +629,7 @@ function App() {
                     />
                   </label>
                   <label className="field">
-                    <span className="field-label">Model</span>
+                    <span className="field-label">模型</span>
                     <input
                       value={config.apiModel}
                       placeholder="gpt-4o-mini"
@@ -533,7 +639,7 @@ function App() {
                     />
                   </label>
                   <p className="hint hint-inline">
-                    Posts you scroll past are sent to this endpoint. The key is stored unencrypted in the browser.
+                    你刷过的推文会发往这个端点。API Key 以明文存在浏览器本地。
                   </p>
                   <div className="api-actions">
                     <button
@@ -542,12 +648,12 @@ function App() {
                       onClick={() => void testApi()}
                       disabled={apiTest === 'testing'}
                     >
-                      {apiTest === 'testing' ? 'Testing…' : 'Test connection'}
+                      {apiTest === 'testing' ? '测试中…' : '测试连接'}
                     </button>
-                    {apiTest === 'ok' && <span className="api-status api-ok">Connected</span>}
+                    {apiTest === 'ok' && <span className="api-status api-ok">已连通</span>}
                     {apiTest === 'error' && (
                       <span className="api-status api-err" title={apiError}>
-                        {apiError || 'Failed'}
+                        {apiError || '失败'}
                       </span>
                     )}
                   </div>
@@ -564,14 +670,14 @@ function App() {
             type="checkbox"
             checked={config.debug}
             onChange={(e) => update({ debug: e.target.checked })}
-            aria-label="Debug labels"
+            aria-label="调试标签"
           />
           <span className="switch-track" aria-hidden="true">
             <span className="switch-thumb" />
           </span>
-          <span className="switch-label">Debug labels</span>
+          <span className="switch-label">调试标签</span>
         </label>
-        <span className="footer-hint">Reload an open X tab to re-scan posts already on screen.</span>
+        <span className="footer-hint">屏幕上已有的推文需要刷新 X 页面才会重新判定。</span>
       </footer>
     </div>
   );
@@ -588,12 +694,12 @@ function ModelBanner({
 }) {
   const pct = progress != null ? ` ${Math.round(progress * 100)}%` : '';
   const meta: Record<ModelState, { cls: string; text: string }> = {
-    checking: { cls: 'banner-info', text: 'Checking AI…' },
-    ready: { cls: 'banner-ok', text: 'AI ready' },
-    downloading: { cls: 'banner-info', text: `Downloading model…${pct}` },
-    downloadable: { cls: 'banner-info', text: 'On-device model not downloaded' },
-    unavailable: { cls: 'banner-warn', text: 'AI unavailable on this device' },
-    unsupported: { cls: 'banner-warn', text: 'Needs Chrome 138+ with Prompt API' },
+    checking: { cls: 'banner-info', text: '正在检查本机模型…' },
+    ready: { cls: 'banner-ok', text: '本机模型就绪' },
+    downloading: { cls: 'banner-info', text: `正在下载模型…${pct}` },
+    downloadable: { cls: 'banner-info', text: '本机模型尚未下载' },
+    unavailable: { cls: 'banner-warn', text: '本设备不支持本机模型' },
+    unsupported: { cls: 'banner-warn', text: '需要 Chrome 138+ 并开启 Prompt API' },
   };
   const m = meta[model];
   const warn = model === 'unavailable' || model === 'unsupported';
@@ -608,13 +714,13 @@ function ModelBanner({
         </span>
         {model === 'downloadable' && (
           <button type="button" className="add add-compact" onClick={onDownload}>
-            Download
+            下载
           </button>
         )}
       </div>
       {warn && (
         <p className="hint hint-inline">
-          Category &amp; rule filters need Gemini Nano; author blocking works without it.
+          话题与规则过滤需要 Gemini Nano；屏蔽作者不需要模型也能用。
         </p>
       )}
     </>

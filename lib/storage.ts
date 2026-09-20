@@ -1,11 +1,12 @@
 import { storage } from '#imports';
 import type { FilterConfig } from './types';
 import { CATEGORIES } from './categories';
+import { DEFAULT_JEV_BASE_URL, DEFAULT_JEV_THRESHOLD } from './jev';
 
 export const DEFAULT_CONFIG: FilterConfig = {
   enabled: true,
   rules: [],
-  categories: Object.fromEntries(CATEGORIES.map((c) => [c.id, false])),
+  categories: Object.fromEntries(CATEGORIES.map((c) => [c.id, c.defaultOn === true])),
   blockedAuthors: [],
   debug: false,
   showEngagement: true,
@@ -16,6 +17,9 @@ export const DEFAULT_CONFIG: FilterConfig = {
   apiBaseUrl: 'https://api.openai.com/v1',
   apiKey: '',
   apiModel: 'gpt-4o-mini',
+  jevApiKey: '',
+  jevBaseUrl: DEFAULT_JEV_BASE_URL,
+  jevThreshold: DEFAULT_JEV_THRESHOLD,
 };
 
 /** Merge stored config with defaults so new fields work for older installs. */
@@ -34,6 +38,9 @@ export function normalizeConfig(c: Partial<FilterConfig> | null | undefined): Fi
     apiBaseUrl: c?.apiBaseUrl ?? DEFAULT_CONFIG.apiBaseUrl,
     apiKey: c?.apiKey ?? DEFAULT_CONFIG.apiKey,
     apiModel: c?.apiModel ?? DEFAULT_CONFIG.apiModel,
+    jevApiKey: c?.jevApiKey ?? DEFAULT_CONFIG.jevApiKey,
+    jevBaseUrl: c?.jevBaseUrl ?? DEFAULT_CONFIG.jevBaseUrl,
+    jevThreshold: c?.jevThreshold ?? DEFAULT_CONFIG.jevThreshold,
     debug: c?.debug ?? DEFAULT_CONFIG.debug,
     enabled: c?.enabled ?? DEFAULT_CONFIG.enabled,
   };

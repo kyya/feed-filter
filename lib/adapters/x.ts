@@ -471,7 +471,7 @@ export const xAdapter: PlatformAdapter = {
     return { replies, reposts, likes, views };
   },
 
-  collapse(node, reason) {
+  collapse(node, reason, title = '可能的垃圾信息 · 已折叠') {
     if (node.dataset.xffCollapsed === 'true' || node.dataset.xffRevealed === 'true') return;
     node.dataset.xffCollapsed = 'true';
 
@@ -493,15 +493,30 @@ export const xAdapter: PlatformAdapter = {
       'gap:12px;width:100%;padding:12px 16px;' +
       'font-family:inherit;font-size:15px;line-height:20px;color:rgb(113,118,123);';
 
-    const label = document.createElement('span');
-    label.textContent = `Hidden — ${reason}`;
-    label.style.cssText = 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    // Two stacked lines: the headline says what happened, the badge line names
+    // the rule that matched. Both inherit the muted placeholder color so the
+    // row reads the same in X's light and dark themes.
+    const label = document.createElement('div');
+    label.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;';
+
+    const head = document.createElement('span');
+    head.textContent = title;
+    head.style.cssText =
+      'font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+
+    const why = document.createElement('span');
+    why.textContent = `已折叠: ${reason}`;
+    why.style.cssText =
+      'font-size:13px;line-height:16px;opacity:0.85;' +
+      'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+
+    label.append(head, why);
 
     const trailing = document.createElement('div');
     trailing.style.cssText = 'display:flex;align-items:center;gap:8px;flex:none;';
 
     const btn = document.createElement('button');
-    btn.textContent = 'Show';
+    btn.textContent = '显示这条';
     // Subtle inline text link, matching X's accent, not a filled pill.
     btn.style.cssText =
       'flex:none;cursor:pointer;border:none;background:none;padding:0;' +

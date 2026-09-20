@@ -1,5 +1,6 @@
 import type { FilterConfig, PostData, Verdict } from '@/lib/types';
 import { allKeep } from './parse';
+import { classifyJev } from './jev';
 import { classifyOnDevice } from './onDevice';
 import { classifyOpenAI } from './openai';
 
@@ -24,9 +25,9 @@ export async function classifyBatch(posts: PostData[], config: FilterConfig): Pr
   }
   const provider = config.provider ?? 'on-device';
   try {
-    return provider === 'openai'
-      ? await classifyOpenAI(posts, config)
-      : await classifyOnDevice(posts, config);
+    if (provider === 'openai') return await classifyOpenAI(posts, config);
+    if (provider === 'jev') return await classifyJev(posts, config);
+    return await classifyOnDevice(posts, config);
   } catch (err) {
     console.warn('[XFF/bg] classifyBatch failed, keeping all posts:', err);
     return allKeep(posts.length);

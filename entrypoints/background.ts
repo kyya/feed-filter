@@ -18,8 +18,8 @@ export default defineBackground(() => {
 
   // --- Provider-aware batch queue -------------------------------------------
   // On-device (Gemini Nano) runs one inference at a time, so those batches are
-  // strictly serialized. OpenAI-compatible endpoints have no single-model
-  // bottleneck, so their batches run concurrently up to a small cap.
+  // strictly serialized. Remote endpoints (OpenAI-compatible, Jev) have no
+  // single-model bottleneck, so their batches run concurrently up to a small cap.
   const MAX_CONCURRENT = 4;
   let tail: Promise<unknown> = Promise.resolve();
   let active = 0;
@@ -38,7 +38,7 @@ export default defineBackground(() => {
 
   function enqueue(posts: PostData[]): Promise<Verdict[]> {
     const safe = () => classifyBatch(posts, config).catch(() => allKeep(posts.length));
-    if ((config.provider ?? 'on-device') === 'openai') {
+    if ((config.provider ?? 'on-device') !== 'on-device') {
       return withSlot(safe);
     }
     const run = tail.then(safe);

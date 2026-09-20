@@ -457,7 +457,8 @@ body {
 /* Compact provider segment */
 .segment {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   gap: 0;
   border: 1.5px solid var(--border-strong);
   border-radius: 2px;
@@ -689,11 +690,29 @@ body {
 
 .field-label {
   font-family: var(--font-display);
-  font-size: 10px;
+  /* 11px + tighter tracking: 10px uppercase tracking is unreadable for CJK. */
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+/* Threshold slider: a bare track, not the boxed text-input chrome above. */
+.field-range input[type='range'] {
+  padding: 0;
+  border: none;
+  background: transparent;
+  accent-color: var(--signal);
+  cursor: pointer;
+}
+.field-range input[type='range']:focus {
+  box-shadow: none;
+}
+.field-value {
+  margin-left: 6px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
 }
 
 .api-actions {

@@ -1,7 +1,7 @@
 // Shared types for the X Feed Filter extension.
 
 /** Which backend classifies posts. */
-export type Provider = 'on-device' | 'openai';
+export type Provider = 'on-device' | 'openai' | 'jev';
 
 /** User-configurable filter settings, persisted in extension storage. */
 export interface FilterConfig {
@@ -31,6 +31,12 @@ export interface FilterConfig {
   apiKey: string;
   /** Model name for the OpenAI-compatible endpoint, e.g. gpt-4o-mini. */
   apiModel: string;
+  /** API key for TypeSafe Jev (stored unencrypted in local storage). */
+  jevApiKey: string;
+  /** TypeSafe API base URL; `/v1/systemone` is appended to it. */
+  jevBaseUrl: string;
+  /** Noul probability (0–1) at or above which a Jev rule counts as matched. */
+  jevThreshold: number;
 }
 
 /** A single post extracted from the page, sent to the background for judging. */
@@ -38,6 +44,23 @@ export interface PostData {
   id: string;
   author: string;
   text: string;
+  /** Engagement counts, when the provider asks for them (Jev's typed state). */
+  metrics?: PostMetrics;
+  /** True when the post is part of a same-author thread. */
+  inThread?: boolean;
+}
+
+/**
+ * One active filter criterion: `description` is what the model judges, `label`
+ * is the short name shown in the UI and in hide reasons.
+ */
+export interface LabeledCriterion {
+  label: string;
+  description: string;
+  /** Jev only: what a *true* answer looks like, from the preset's noul criteria. */
+  matchesWhen?: string;
+  /** Jev only: what a *false* answer looks like. */
+  notMatchesWhen?: string;
 }
 
 /** Engagement counts scraped from a post's action bar. */
@@ -83,7 +106,7 @@ export interface PlatformAdapter {
   /** Pull reply/repost/like/view counts from a post's action bar. */
   extractMetrics(node: HTMLElement): PostMetrics | null;
   /** Collapse a matched post into a thin placeholder with a reason + reveal. */
-  collapse(node: HTMLElement, reason: string): void;
+  collapse(node: HTMLElement, reason: string, title?: string): void;
   /** Undo a collapse (the "Show anyway" action). */
   restore(node: HTMLElement): void;
   /**
@@ -103,15 +126,16 @@ export interface PlatformAdapter {
   /**
    * Stamp a post with its engagement rate. `ratePct` is (likes+replies+reposts)/views×100;
    * `high` switches to the Hot styling when at/above the user threshold. `standout`
-   * names the metric (likes/replies/reposts) that is disproportionately high for
-   * this post, so the hover readout can highlight it — or null when none stands out.
+   * is the metric name — spelled exactly as `detail` prints it — that is
+   * disproportionately high for this post, so the hover readout can highlight
+   * it, or null when none stands out.
    */
   annotateEngagement(
     node: HTMLElement,
     ratePct: number,
     high: boolean,
     detail: string,
-    standout?: 'likes' | 'replies' | 'reposts' | null,
+    standout?: string | null,
   ): void;
   /** Remove all engagement-rate badges from a DOM subtree. */
   clearEngagement(root: ParentNode): void;
