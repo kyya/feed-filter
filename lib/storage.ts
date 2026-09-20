@@ -2,9 +2,11 @@ import { storage } from '#imports';
 import type { FilterConfig } from './types';
 import { CATEGORIES } from './categories';
 import { DEFAULT_JEV_BASE_URL, DEFAULT_JEV_THRESHOLD } from './jev';
+import { DEFAULT_RADAR_THRESHOLD } from './radar';
 
 export const DEFAULT_CONFIG: FilterConfig = {
   enabled: true,
+  mode: 'filter',
   rules: [],
   categories: Object.fromEntries(CATEGORIES.map((c) => [c.id, c.defaultOn === true])),
   blockedAuthors: [],
@@ -20,6 +22,7 @@ export const DEFAULT_CONFIG: FilterConfig = {
   jevApiKey: '',
   jevBaseUrl: DEFAULT_JEV_BASE_URL,
   jevThreshold: DEFAULT_JEV_THRESHOLD,
+  radarThreshold: DEFAULT_RADAR_THRESHOLD,
 };
 
 /** Merge stored config with defaults so new fields work for older installs. */
@@ -41,6 +44,8 @@ export function normalizeConfig(c: Partial<FilterConfig> | null | undefined): Fi
     jevApiKey: c?.jevApiKey ?? DEFAULT_CONFIG.jevApiKey,
     jevBaseUrl: c?.jevBaseUrl ?? DEFAULT_CONFIG.jevBaseUrl,
     jevThreshold: c?.jevThreshold ?? DEFAULT_CONFIG.jevThreshold,
+    radarThreshold: c?.radarThreshold ?? DEFAULT_CONFIG.radarThreshold,
+    mode: c?.mode ?? DEFAULT_CONFIG.mode,
     debug: c?.debug ?? DEFAULT_CONFIG.debug,
     enabled: c?.enabled ?? DEFAULT_CONFIG.enabled,
   };

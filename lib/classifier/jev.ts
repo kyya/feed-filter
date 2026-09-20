@@ -1,4 +1,3 @@
-import { storage } from '#imports';
 import { activeCriteriaLabeled } from '@/lib/prompt';
 import {
   buildJevRequest,
@@ -10,6 +9,7 @@ import {
   verdictsFromJev,
 } from '@/lib/jev';
 import type { FilterConfig, LabeledCriterion, PostData, Verdict } from '@/lib/types';
+import { defineTtlCache } from './cache';
 import { allKeep } from './parse';
 
 // TypeSafe Jev classifier. Unlike the chat-based providers there is no prompt:
@@ -17,54 +17,16 @@ import { allKeep } from './parse';
 // becomes a Noul question over it, and the returned probabilities are
 // thresholded here. Anything below the threshold keeps the post (fail-open).
 
-/** Verdicts survive a browser restart, so a scrolled-back post is never re-billed. */
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const CACHE_MAX_ENTRIES = 2000;
-
-interface JevCache {
-  /** Criteria + threshold the cached verdicts were produced under. */
-  sig: string;
-  entries: Record<string, { verdict: Verdict; at: number }>;
-}
-
-const EMPTY_CACHE: JevCache = { sig: '', entries: {} };
-
-const jevCache = storage.defineItem<JevCache>('local:jevVerdictCache', { fallback: EMPTY_CACHE });
+/**
+ * Verdicts survive a browser restart, so a scrolled-back post is never
+ * re-billed. The `V2` key is not cosmetic: the entry shape moved from
+ * `{ verdict, at }` to the shared cache's `{ value, at }`, so rows written by
+ * an older build would read back empty and squat the entry cap for a day.
+ */
+const jevCache = defineTtlCache<Verdict>('local:jevVerdictCacheV2', 24 * 60 * 60 * 1000, 2000);
 
 const cacheSignature = (criteria: LabeledCriterion[], threshold: number) =>
   JSON.stringify([criteria.map((c) => c.description), threshold]);
-
-/** Cached verdicts for the current criteria, with expired entries dropped. */
-async function readCache(sig: string): Promise<Record<string, Verdict>> {
-  const stored = (await jevCache.getValue()) ?? EMPTY_CACHE;
-  if (stored.sig !== sig) return {};
-  const cutoff = Date.now() - CACHE_TTL_MS;
-  const fresh: Record<string, Verdict> = {};
-  for (const [id, entry] of Object.entries(stored.entries ?? {})) {
-    if (entry && entry.at > cutoff) fresh[id] = entry.verdict;
-  }
-  return fresh;
-}
-
-async function writeCache(sig: string, fresh: Record<string, Verdict>): Promise<void> {
-  const stored = (await jevCache.getValue()) ?? EMPTY_CACHE;
-  const cutoff = Date.now() - CACHE_TTL_MS;
-  const now = Date.now();
-  const entries = stored.sig === sig ? { ...stored.entries } : {};
-  for (const [id, entry] of Object.entries(entries)) {
-    if (!entry || entry.at <= cutoff) delete entries[id];
-  }
-  for (const [id, verdict] of Object.entries(fresh)) entries[id] = { verdict, at: now };
-
-  const ids = Object.keys(entries);
-  if (ids.length > CACHE_MAX_ENTRIES) {
-    ids
-      .sort((a, b) => entries[a].at - entries[b].at)
-      .slice(0, ids.length - CACHE_MAX_ENTRIES)
-      .forEach((id) => delete entries[id]);
-  }
-  await jevCache.setValue({ sig, entries });
-}
 
 export async function classifyJev(posts: PostData[], config: FilterConfig): Promise<Verdict[]> {
   const key = (config.jevApiKey || '').trim();
@@ -77,7 +39,7 @@ export async function classifyJev(posts: PostData[], config: FilterConfig): Prom
 
   const threshold = normalizeThreshold(config.jevThreshold);
   const sig = cacheSignature(criteria, threshold);
-  const cached = await readCache(sig);
+  const cached = await jevCache.read(sig);
 
   const out = allKeep(posts.length);
   const ask: PostData[] = [];
@@ -121,7 +83,7 @@ export async function classifyJev(posts: PostData[], config: FilterConfig): Prom
   }
 
   if (Object.keys(fresh).length > 0) {
-    await writeCache(sig, fresh).catch((err) =>
+    await jevCache.write(sig, fresh).catch((err) =>
       console.warn('[XFF/bg] Jev verdict cache write failed:', err),
     );
   }

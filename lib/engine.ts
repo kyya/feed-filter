@@ -1,6 +1,17 @@
 import { filterConfig, DEFAULT_CONFIG, normalizeConfig } from '@/lib/storage';
 import { getAdapter } from '@/lib/adapters';
-import type { DebugKind, FilterConfig, PostData, PostMetrics, Verdict } from '@/lib/types';
+import { toTriageItem } from '@/lib/radar';
+import type {
+  DebugKind,
+  FilterConfig,
+  InboxResult,
+  PostData,
+  PostMetrics,
+  RadarBadgeState,
+  RadarVerdict,
+  TriageResult,
+  Verdict,
+} from '@/lib/types';
 
 /** A cached, DOM-independent verdict for a post, keyed by its stable id. */
 type Decision =
@@ -273,49 +284,94 @@ export function startEngine() {
     }
   };
 
-  // --- Batch classification scheduler ---------------------------------------
-  // Rather than one round-trip per post, buffer posts that need the LLM and send
+  // --- Batch scheduler -------------------------------------------------------
+  // Rather than one round-trip per post, buffer posts that need a model and send
   // them in batches: it amortizes the fixed system-prompt cost and slashes API
   // cost/latency. Posts flush when the buffer fills or after a short debounce.
   // `inflight` dedupes by post id so the same post never rides two batches.
   const BATCH_SIZE = 8;
   const BATCH_DEBOUNCE_MS = 120;
-  const pending: PostData[] = [];
-  const resolvers = new Map<string, (v: Verdict | null) => void>();
-  const inflight = new Map<string, Promise<Verdict | null>>();
-  let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function flushNow() {
-    if (flushTimer != null) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
+  /**
+   * One queue per background message type. The filter and the radar each get
+   * their own instance, so a slow prescreen never delays a collapse decision
+   * and a batch of one never waits on the other's debounce.
+   */
+  function makeBatchQueue<R>(type: string) {
+    const pending: PostData[] = [];
+    const resolvers = new Map<string, (v: R | null) => void>();
+    const inflight = new Map<string, Promise<R | null>>();
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    function flushNow() {
+      if (flushTimer != null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (pending.length === 0) return;
+      const batch = pending.splice(0, BATCH_SIZE);
+      console.log('[XFF] sending batch of', batch.length, 'post(s) to', type);
+      browser.runtime
+        .sendMessage({ type, posts: batch })
+        .then((results?: R[]) => {
+          batch.forEach((post, i) => resolvers.get(post.id)?.(results?.[i] ?? null));
+        })
+        .catch((err) => {
+          console.warn(`[XFF] ${type} failed, leaving posts untouched:`, err);
+          batch.forEach((post) => resolvers.get(post.id)?.(null));
+        });
+      if (pending.length > 0) scheduleFlush();
     }
-    if (pending.length === 0) return;
-    const batch = pending.splice(0, BATCH_SIZE);
-    console.log('[XFF] sending batch of', batch.length, 'post(s) for classification');
-    browser.runtime
-      .sendMessage({ type: 'classifyBatch', posts: batch })
-      .then((verdicts?: Verdict[]) => {
-        batch.forEach((post, i) => resolvers.get(post.id)?.(verdicts?.[i] ?? null));
-      })
-      .catch((err) => {
-        console.warn('[XFF] batch classify failed, leaving posts visible:', err);
-        batch.forEach((post) => resolvers.get(post.id)?.(null));
-      });
-    if (pending.length > 0) scheduleFlush();
+
+    function scheduleFlush() {
+      if (pending.length >= BATCH_SIZE) {
+        flushNow();
+        return;
+      }
+      if (flushTimer == null) flushTimer = setTimeout(flushNow, BATCH_DEBOUNCE_MS);
+    }
+
+    return {
+      /** Queue a post; resolves null on error so callers can fail open. */
+      request(post: PostData): Promise<R | null> {
+        const existing = inflight.get(post.id);
+        if (existing) return existing;
+        const p = new Promise<R | null>((resolve) => resolvers.set(post.id, resolve));
+        inflight.set(post.id, p);
+        void p.finally(() => {
+          // Identity check: `drain()` clears both maps synchronously while this
+          // callback is still a pending microtask, so by the time it runs the
+          // slot may already belong to a newer request for the same post.
+          if (inflight.get(post.id) !== p) return;
+          inflight.delete(post.id);
+          resolvers.delete(post.id);
+        });
+        pending.push(post);
+        scheduleFlush();
+        return p;
+      },
+      /** Drop everything queued and resolve every waiter with null. */
+      drain() {
+        if (flushTimer != null) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        pending.length = 0;
+        for (const resolve of resolvers.values()) resolve(null);
+        resolvers.clear();
+        inflight.clear();
+      },
+    };
   }
 
-  function scheduleFlush() {
-    if (pending.length >= BATCH_SIZE) {
-      flushNow();
-      return;
-    }
-    if (flushTimer == null) flushTimer = setTimeout(flushNow, BATCH_DEBOUNCE_MS);
-  }
+  const verdictQueue = makeBatchQueue<Verdict>('classifyBatch');
+  const radarQueue = makeBatchQueue<RadarVerdict>('radarBatch');
 
   // Jev judges structured state rather than a prompt, so it gets the extra
   // signals the adapter already exposes (engagement counts, thread context).
   // The prompt-based providers only read author/text, so skip the DOM work.
+  // The radar deliberately sends neither: its three questions are about the
+  // text alone, and every extra field is billed on every post.
   const enrich = (node: HTMLElement, post: PostData): PostData =>
     config.provider === 'jev'
       ? {
@@ -325,49 +381,176 @@ export function startEngine() {
         }
       : post;
 
-  // Request a verdict for a post via the batch queue. Returns null on error
-  // (fail open). Dedupes concurrent requests for the same post id.
-  const requestVerdict = (post: PostData): Promise<Verdict | null> => {
-    const existing = inflight.get(post.id);
-    if (existing) return existing;
-    const p = new Promise<Verdict | null>((resolve) => resolvers.set(post.id, resolve));
-    inflight.set(post.id, p);
-    void p.finally(() => {
-      inflight.delete(post.id);
-      resolvers.delete(post.id);
-    });
-    pending.push(post);
-    scheduleFlush();
-    return p;
+  // --- Ingest radar ----------------------------------------------------------
+  // Prescreen verdicts are cached by post id like filter decisions are, so a
+  // virtualized post that scrolls back gets its badge without a round trip.
+  // Triage results are cached too, and for a harder reason: they cost real
+  // money, so re-opening a card must never re-run the judgement.
+  const radarVerdicts = new Map<string, RadarVerdict>();
+  const triageResults = new Map<string, Extract<TriageResult, { ok: true }>>();
+  /** Triage round trips in flight, so a recycled node can't buy a second one. */
+  const triageInflight = new Map<string, Promise<TriageResult>>();
+  const radarApplied = new WeakMap<HTMLElement, string>();
+  const radarNoted = new WeakMap<HTMLElement, string>();
+
+  // The radar has its own generation counter. Moving the radar threshold must
+  // repaint every badge, but it says nothing about what should be collapsed —
+  // bumping `gen` for it would throw away paid-for filter verdicts.
+  let radarGen = 0;
+  const radarStamp = (id: string) => `${radarGen}:${id}`;
+
+  /**
+   * Fold the prescreen numbers into this node's debug tooltip. Non-candidates
+   * show nothing on screen at all unless debug labels are on, which is the
+   * point: the radar adds one badge to the posts worth a look, not noise to
+   * every post.
+   */
+  const noteRadarDebug = (node: HTMLElement, post: PostData, note: string) => {
+    if (radarNoted.get(node) === radarStamp(post.id)) return;
+    radarNoted.set(node, radarStamp(post.id));
+    const seen = outcomes.get(node);
+    if (seen) debug(node, seen.label, seen.kind, `${seen.detail}\n雷达：${note}`, seen.confidence);
+    else debug(node, '◦ 雷达', 'skipped', `雷达：${note}`);
   };
 
-  async function processPost(node: HTMLElement) {
-    if (!config.enabled) return;
+  const showCard = (node: HTMLElement, post: PostData, result: TriageResult) => {
+    adapter!.triageCard(node, result, {
+      onIngest: async (): Promise<InboxResult> => {
+        if (!result.ok) return { ok: false, error: '没有可入库的判定' };
+        try {
+          return (await browser.runtime.sendMessage({
+            type: 'inbox',
+            item: toTriageItem(post),
+            verdict: result.verdict,
+          })) as InboxResult;
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+    });
+  };
 
-    const post = adapter!.extractPost(node);
-    if (!post) {
-      if (applied.get(node) === stamp(NO_POST)) return;
-      applied.set(node, stamp(NO_POST));
-      debug(node, '? 无法解析', 'skipped', '没能从这个节点里取出正文/作者 — 可能不是真的推文，或者 X 的 DOM 变了。');
+  const badgeFor = (post: PostData, verdict: RadarVerdict): RadarBadgeState => {
+    const done = triageResults.get(post.id);
+    if (done) return { kind: 'done', recommend: done.verdict.recommend };
+    return { kind: 'candidate', signals: verdict.signals! };
+  };
+
+  async function requestTriage(post: PostData): Promise<TriageResult> {
+    try {
+      return (await browser.runtime.sendMessage({
+        type: 'triage',
+        item: toTriageItem(post),
+      })) as TriageResult;
+    } catch (err) {
+      return {
+        ok: false,
+        offline: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  async function onRadarClick(node: HTMLElement, post: PostData, verdict: RadarVerdict) {
+    // Already judged: re-open the card from cache rather than paying again.
+    const done = triageResults.get(post.id);
+    if (done) {
+      showCard(node, post, done);
       return;
     }
 
+    adapter!.radarBadge(node, { kind: 'busy' }, () => {});
+    // Dedupe by post id, not by badge: X recycles timeline nodes, and a fresh
+    // node paints a fresh (clickable) badge while the first request is still
+    // out. `disabled` alone would let that second click buy a second judgement.
+    let inflight = triageInflight.get(post.id);
+    if (!inflight) {
+      inflight = requestTriage(post);
+      triageInflight.set(post.id, inflight);
+      void inflight.finally(() => triageInflight.delete(post.id));
+    }
+    const result = await inflight;
+
+    // Only successes are cached — a failure has to stay retryable.
+    if (result.ok) triageResults.set(post.id, result);
+    adapter!.radarBadge(
+      node,
+      result.ok ? { kind: 'done', recommend: result.verdict.recommend } : { kind: 'failed' },
+      () => void onRadarClick(node, post, verdict),
+    );
+    showCard(node, post, result);
+  }
+
+  const paintRadar = (node: HTMLElement, post: PostData, verdict: RadarVerdict) => {
+    if (verdict.signals) noteRadarDebug(node, post, verdict.reason);
+    if (!verdict.candidate || !verdict.signals) return;
+    adapter!.radarBadge(node, badgeFor(post, verdict), () =>
+      void onRadarClick(node, post, verdict),
+    );
+  };
+
+  async function runRadar(node: HTMLElement, post: PostData) {
+    // `extractPost` synthesizes an id from author+text when it can't find a
+    // status link. There is no permalink to ingest in that case, and sending
+    // one would put a fabricated URL into the knowledge base.
+    if (!/^\d+$/.test(post.id)) return;
+    if (radarApplied.get(node) === radarStamp(post.id)) return;
+
+    const cached = radarVerdicts.get(post.id);
+    if (cached) {
+      radarApplied.set(node, radarStamp(post.id));
+      paintRadar(node, post, cached);
+      return;
+    }
+
+    // Claim the node before the await, same reason as the filter pass does.
+    radarApplied.set(node, radarStamp(post.id));
+    const requestGen = radarGen;
+    const verdict = await radarQueue.request(post);
+    if (requestGen !== radarGen) return;
+    if (!verdict) {
+      // No prescreen, no badge — and allow a later scan to retry.
+      radarApplied.delete(node);
+      return;
+    }
+    radarVerdicts.set(post.id, verdict);
+    paintRadar(node, post, verdict);
+  }
+
+  /**
+   * The collapse pipeline. Its return value is what gates the radar in `both`
+   * mode, so it has three outcomes, not two: `pending` means this pass reached
+   * no conclusion (a verdict is still in flight on another scan, or the config
+   * moved under us). Treating that as `keep` would prescreen — and bill for —
+   * every post a moment before the filter collapses it.
+   */
+  type FilterOutcome = 'hide' | 'keep' | 'pending';
+
+  async function runFilter(node: HTMLElement, post: PostData): Promise<FilterOutcome> {
     // Low-ER check runs before the applied early-return so late-hydrated view
     // counts can still hide a post that was kept while views were missing.
     if (tryHideLowEngagement(node, post)) {
       applied.set(node, stamp(post.id));
-      return;
+      return 'hide';
     }
 
-    // This exact node already reflects this post under the current config.
-    if (applied.get(node) === stamp(post.id)) return;
+    const hidden = (d: Decision): FilterOutcome => (d.kind !== 'keep' ? 'hide' : 'keep');
+
+    // This exact node already reflects this post under the current config —
+    // but `applied` is stamped *before* the await below, so a missing decision
+    // here means another scan is still waiting on the model, not that the post
+    // was kept.
+    if (applied.get(node) === stamp(post.id)) {
+      const settled = decisions.get(post.id);
+      return settled ? hidden(settled) : 'pending';
+    }
 
     // Fast path: we've already judged this post id (even on another node).
     const cached = decisions.get(post.id);
     if (cached) {
       applyDecision(node, cached);
       applied.set(node, stamp(post.id));
-      return;
+      return hidden(cached);
     }
     console.log('[XFF] extracted post', { id: post.id, author: post.author, text: post.text.slice(0, 60) });
 
@@ -380,7 +563,7 @@ export function startEngine() {
         confidence: threadConfidence.get(node) ?? 0,
       });
       applied.set(node, stamp(post.id));
-      return;
+      return 'hide';
     }
 
     // Deterministic author blocklist — no LLM needed.
@@ -394,7 +577,7 @@ export function startEngine() {
         decisions.set(post.id, d);
         applyDecision(node, d);
         applied.set(node, stamp(post.id));
-        return;
+        return 'hide';
       }
     }
 
@@ -404,7 +587,7 @@ export function startEngine() {
     if (!hasLlmFilters) {
       applied.set(node, stamp(post.id));
       debug(node, '— 未启用过滤', 'skipped', '没有启用任何预设话题或自定义规则，没东西可匹配，直接保留。去设置页打开几个。');
-      return;
+      return 'keep';
     }
 
     // Mark this node handled NOW, before the (slow) await. Otherwise the
@@ -415,16 +598,18 @@ export function startEngine() {
     // Classify via the batch queue (dedupes by post id under the hood).
     debug(node, '… 判定中', 'pending', '已发给模型 — 等待判定结果。');
     const requestGen = gen;
-    const verdict = await requestVerdict(enrich(node, post));
+    const verdict = await verdictQueue.request(enrich(node, post));
 
     // Config changed while we waited — this verdict is stale; a re-scan will
     // re-evaluate under the new generation (the stamp above is now outdated).
-    if (requestGen !== gen) return;
+    if (requestGen !== gen) return 'pending';
     if (!verdict) {
-      // Fail open and allow a later retry.
+      // Fail open and allow a later retry. The post stays visible, but we
+      // don't know whether it would have been collapsed, so the radar waits
+      // for the retry rather than spending on it now.
       applied.delete(node);
       debug(node, '⚠ 判定失败', 'skipped', '判定出错，按 fail-open 保留这条。');
-      return;
+      return 'pending';
     }
     const decision: Decision = verdict.hide
       ? {
@@ -439,6 +624,30 @@ export function startEngine() {
         };
     decisions.set(post.id, decision);
     applyDecision(node, decision);
+    return verdict.hide ? 'hide' : 'keep';
+  }
+
+  async function processPost(node: HTMLElement) {
+    if (!config.enabled) return;
+
+    const post = adapter!.extractPost(node);
+    if (!post) {
+      if (applied.get(node) === stamp(NO_POST)) return;
+      applied.set(node, stamp(NO_POST));
+      debug(node, '? 无法解析', 'skipped', '没能从这个节点里取出正文/作者 — 可能不是真的推文，或者 X 的 DOM 变了。');
+      return;
+    }
+
+    if (config.mode !== 'radar') {
+      // Only a post the filter settled on and kept reaches the radar: a
+      // collapsed post is one you decided not to read, and an undecided one
+      // may be about to become one.
+      if ((await runFilter(node, post)) !== 'keep') return;
+    } else {
+      applied.set(node, stamp(post.id));
+    }
+
+    if (config.mode !== 'filter') void runRadar(node, post);
   }
 
   let scheduled = false;
@@ -461,8 +670,11 @@ export function startEngine() {
     console.log('[XFF] config loaded', config);
     scan();
   });
-  // Signature of everything that affects a verdict (i.e. everything but the
-  // debug flag). When it changes, cached decisions are stale.
+  // Signature of everything that affects a collapse verdict. When it changes,
+  // cached decisions are stale. Radar-only settings are deliberately absent:
+  // they can't change what gets collapsed, and invalidating here would re-bill
+  // the whole visible feed for a pass that has no persistent cache under the
+  // on-device and OpenAI providers.
   const filterSig = (c: FilterConfig) =>
     JSON.stringify({
       enabled: c.enabled,
@@ -480,28 +692,42 @@ export function startEngine() {
       jevThreshold: c.jevThreshold,
     });
 
+  /** What the radar pass depends on, beyond everything the filter does. */
+  const radarSig = (c: FilterConfig) =>
+    JSON.stringify({ mode: c.mode, radarThreshold: c.radarThreshold });
+
   filterConfig.watch((raw) => {
     const c = normalizeConfig(raw);
     const wasDebug = config.debug;
     const wasEngagement = config.showEngagement;
     const wasHighPct = config.engagementHighPct;
     const filtersChanged = filterSig(config) !== filterSig(c);
+    // Anything that invalidates the filter (the API key, the master switch)
+    // invalidates the prescreen too; the reverse is not true.
+    const radarChanged = filtersChanged || radarSig(config) !== radarSig(c);
     config = c;
-    console.log('[XFF] config changed', { filtersChanged, c });
+    console.log('[XFF] config changed', { filtersChanged, radarChanged, c });
 
     if (filtersChanged) {
       // Invalidate every cached verdict and drain any in-flight batch so
       // waiters fail open under the old generation (processPost checks gen).
       gen++;
       decisions.clear();
-      if (flushTimer != null) {
-        clearTimeout(flushTimer);
-        flushTimer = null;
-      }
-      pending.length = 0;
-      for (const resolve of resolvers.values()) resolve(null);
-      resolvers.clear();
-      inflight.clear();
+      verdictQueue.drain();
+    }
+
+    if (radarChanged) {
+      // Prescreen verdicts bake in the threshold, so they go too. Triage
+      // results don't depend on any of this and are paid for — they stay.
+      radarGen++;
+      radarVerdicts.clear();
+      radarQueue.drain();
+      // Badges and cards would otherwise linger with stale numbers; a re-scan
+      // repaints whatever is still a candidate.
+      adapter!.clearRadar(document);
+    }
+
+    if (filtersChanged || radarChanged) {
       if (!c.enabled || !c.showEngagement) {
         adapter!.clearEngagement(document);
       }

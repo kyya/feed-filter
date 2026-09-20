@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react';
 import { filterConfig, normalizeConfig } from '@/lib/storage';
 import { CATEGORIES } from '@/lib/categories';
 import { DEFAULT_JEV_BASE_URL, JEV_MODEL, jevEndpoint, normalizeThreshold } from '@/lib/jev';
-import type { FilterConfig, Provider } from '@/lib/types';
+import { normalizeRadarThreshold } from '@/lib/radar';
+import { TRIAGE_BASE_URL, fetchHealth } from '@/lib/triage';
+import type { FilterConfig, FilterMode, Provider, TriageHealth } from '@/lib/types';
 import './App.css';
 
 type ModelState = 'checking' | 'unsupported' | 'unavailable' | 'downloadable' | 'downloading' | 'ready';
 type ApiTestState = 'idle' | 'testing' | 'ok' | 'error';
-type Tab = 'topics' | 'rules' | 'authors' | 'engagement' | 'model';
+type Tab = 'topics' | 'rules' | 'authors' | 'engagement' | 'radar' | 'model';
 
 const EXPECTED = [{ type: 'text' as const, languages: ['en'] }];
 
@@ -16,7 +18,14 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'rules', label: '规则' },
   { id: 'authors', label: '作者' },
   { id: 'engagement', label: '互动' },
+  { id: 'radar', label: '雷达' },
   { id: 'model', label: '分类器' },
+];
+
+const MODES: { id: FilterMode; label: string; hint: string }[] = [
+  { id: 'filter', label: '过滤', hint: '你边刷，它边把噪音从时间线里折掉。' },
+  { id: 'radar', label: '入库雷达', hint: '不折叠任何东西，只把值得入库的推文挑出来。' },
+  { id: 'both', label: '两者', hint: '先折掉噪音，再从剩下的里挑值得入库的。' },
 ];
 
 /** Fill in provider fields missing from older stored configs. */
@@ -68,6 +77,8 @@ function App() {
   const [newAuthor, setNewAuthor] = useState('');
   const [apiTest, setApiTest] = useState<ApiTestState>('idle');
   const [apiError, setApiError] = useState('');
+  const [health, setHealth] = useState<TriageHealth | null>(null);
+  const [probing, setProbing] = useState(false);
 
   useEffect(() => {
     filterConfig.getValue().then((c) => {
@@ -250,6 +261,13 @@ function App() {
     }
   }
 
+  /** Ask the local triage service whether it is up and how big its KB is. */
+  async function probeTriage() {
+    setProbing(true);
+    setHealth(await fetchHealth());
+    setProbing(false);
+  }
+
   function addRule() {
     const r = newRule.trim();
     if (!config || !r) return;
@@ -271,6 +289,7 @@ function App() {
   if (!config) return <div className="app app-loading">加载中…</div>;
 
   const provider = config.provider ?? 'on-device';
+  const mode = config.mode ?? 'filter';
   const activeCats = CATEGORIES.filter((c) => config.categories[c.id]).length;
   const activeEngagement = Number(config.showEngagement) + Number(config.hideLowEngagement);
 
@@ -279,6 +298,11 @@ function App() {
     if (id === 'rules') return <span className="navtab-count">{config!.rules.length}</span>;
     if (id === 'authors') return <span className="navtab-count">{config!.blockedAuthors.length}</span>;
     if (id === 'engagement') return <span className="navtab-count">{activeEngagement}/2</span>;
+    if (id === 'radar') {
+      const on = mode !== 'filter';
+      const color = !on ? 'var(--muted)' : health?.ok ? 'var(--ok)' : health ? 'var(--warn)' : 'var(--signal)';
+      return <span className="navtab-dot" style={{ background: color }} aria-hidden="true" />;
+    }
     if (id === 'model') {
       const color = provider === 'on-device' ? modelDotColor(model) : apiDotColor(apiTest);
       return <span className="navtab-dot" style={{ background: color }} aria-hidden="true" />;
@@ -308,9 +332,26 @@ function App() {
       </header>
       <p className="tagline">
         {config.enabled
-          ? '你边刷，它边把噪音从时间线里折掉。'
+          ? MODES.find((m) => m.id === mode)!.hint
           : '打开开关，开始清理时间线里的噪音。'}
       </p>
+
+      <div className="modebar">
+        <span className="modebar-label">模式</span>
+        <div className="segment" role="group" aria-label="运行模式">
+          {MODES.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              className={mode === m.id ? 'segment-btn segment-on' : 'segment-btn'}
+              aria-pressed={mode === m.id}
+              onClick={() => update({ mode: m.id })}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div className="shell">
         <nav className="rail" role="tablist" aria-label="设置分类">
@@ -501,6 +542,79 @@ function App() {
                 />
               </label>
               <p className="hint hint-inline">浏览量加载出来后，低于该比例的推文会被折叠。</p>
+            </div>
+          )}
+
+          {tab === 'radar' && (
+            <div className="panel-pane" role="tabpanel" id="panel-radar" aria-labelledby="tab-radar">
+              <div className="panel-head">
+                <h2>入库雷达</h2>
+                <p className="panel-desc">自动预筛出值得入库的推文，点徽章再做完整判断。</p>
+              </div>
+
+              {mode === 'filter' && (
+                <div className="banner banner-info">
+                  <span className="status">
+                    <span className="dot" />
+                    当前是「过滤」模式，雷达没在跑
+                  </span>
+                </div>
+              )}
+
+              <label className={`field field-range${mode === 'filter' ? ' field-disabled' : ''}`}>
+                <span className="field-label">
+                  预筛阈值
+                  <span className="field-value">{config.radarThreshold.toFixed(2)}</span>
+                </span>
+                <input
+                  type="range"
+                  min={0.4}
+                  max={0.95}
+                  step={0.05}
+                  value={config.radarThreshold}
+                  onChange={(e) => {
+                    const n = parseFloat(e.target.value);
+                    if (!Number.isFinite(n)) return;
+                    update({ radarThreshold: normalizeRadarThreshold(n) });
+                  }}
+                />
+              </label>
+              <p className="hint hint-inline">
+                每条推文问 Jev 三个问题：实质信息 / 一手来源 / 营销引流。
+                实质 ≥ 阈值且营销 &lt; 60% 的算候选，右上角出一个徽章；一手 ≥ 70% 会加「一手」。
+                实测约 750 token/条（≈ $0.03 / 1000 条），预筛结果按推文缓存 24 小时。
+                预筛走 TypeSafe Jev，需要在「分类器」里填好 API Key（不必把分类器切到 Jev）。
+              </p>
+
+              <label className="field">
+                <span className="field-label">triage 服务</span>
+                <input value={TRIAGE_BASE_URL} readOnly spellCheck={false} />
+              </label>
+              <div className="api-actions">
+                <button
+                  type="button"
+                  className="add add-compact"
+                  onClick={() => void probeTriage()}
+                  disabled={probing}
+                >
+                  {probing ? '检查中…' : '检查服务'}
+                </button>
+                {health?.ok && (
+                  <span className="api-status api-ok">
+                    已连通 · {health.kb} · {health.pages} 页
+                  </span>
+                )}
+                {health && !health.ok && (
+                  <span className="api-status api-err" title={health.error}>
+                    {health.offline ? '未启动' : health.error}
+                  </span>
+                )}
+              </div>
+              <p className="hint hint-inline">
+                没启动就在知识库目录跑 <code>python3 scripts/jev_triage.py serve</code>。
+                预筛只把推文发给 TypeSafe；点徽章做完整判断时，推文先发到这台机器上的本地服务，
+                再由本地服务决定把什么送去 TypeSafe——知识库内容不经过扩展。
+              </p>
             </div>
           )}
 

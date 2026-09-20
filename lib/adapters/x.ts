@@ -1,4 +1,14 @@
-import type { DebugKind, PlatformAdapter } from '@/lib/types';
+import type {
+  DebugKind,
+  PlatformAdapter,
+  RadarBadgeState,
+  TriageCardActions,
+  TriagePageRef,
+  TriageRecommend,
+  TriageResult,
+} from '@/lib/types';
+import { RADAR_PRIMARY_FLOOR } from '@/lib/radar';
+import { TRIAGE_OFFLINE_HINT } from '@/lib/triage';
 
 // All X-specific (and inherently brittle) DOM knowledge is confined here.
 
@@ -7,6 +17,8 @@ const DEBUG_ATTR = 'data-xff-debug';
 const DEBUG_SLOT_ATTR = 'data-xff-debug-slot';
 const ER_ATTR = 'data-xff-er';
 const ER_SLOT_ATTR = 'data-xff-er-slot';
+const RADAR_ATTR = 'data-xff-radar';
+const CARD_ATTR = 'data-xff-triage';
 
 /** X-native accent colors so the badge reads as part of the action row. */
 const DEBUG_COLORS: Record<DebugKind, string> = {
@@ -343,6 +355,373 @@ function handleOf(node: HTMLElement): string {
 
 const articleIn = (cell: HTMLElement): HTMLElement | null =>
   cell.querySelector<HTMLElement>('article[data-testid="tweet"]');
+
+// --- Ingest radar ------------------------------------------------------------
+// Two pieces of chrome: a small badge pinned to a candidate post's top-right
+// corner (left of X's caret menu), and the triage card that opens under the
+// post once the local service has judged it. Neither ever hides anything — the
+// radar only ever adds.
+
+const RADAR_INK = '#fff7f0';
+const RADAR_GREEN = 'rgb(0, 186, 124)';
+const RADAR_AMBER = 'rgb(224, 138, 0)';
+const RADAR_STEEL = 'rgb(113, 118, 123)';
+const RADAR_RED = 'rgb(249, 24, 128)';
+
+/** Card accent per recommendation — also the badge color once triaged. */
+const RECOMMEND_COLORS: Record<TriageRecommend, string> = {
+  ingest: RADAR_GREEN,
+  review: RADAR_AMBER,
+  skip: RADAR_STEEL,
+};
+
+const RECOMMEND_LABELS: Record<TriageRecommend, string> = {
+  ingest: '建议入库',
+  review: '建议复核',
+  skip: '建议跳过',
+};
+
+let radarStylesInjected = false;
+
+function ensureRadarStyles() {
+  if (radarStylesInjected || document.getElementById('xff-radar-styles')) {
+    radarStylesInjected = true;
+    return;
+  }
+  const style = document.createElement('style');
+  style.id = 'xff-radar-styles';
+  style.textContent = `
+    @keyframes xff-radar-in {
+      from { opacity: 0; transform: translateY(-3px) scale(0.94); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes xff-radar-pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.55; }
+    }
+    @keyframes xff-card-in {
+      from { opacity: 0; transform: translateY(-4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    [${RADAR_ATTR}] {
+      position: absolute;
+      top: 6px;
+      right: 52px;
+      z-index: 3;
+      box-sizing: border-box;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      height: 22px;
+      max-width: 200px;
+      padding: 0 9px;
+      border: none;
+      border-radius: 999px;
+      background: ${ER_SIGNAL};
+      color: ${RADAR_INK};
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+      overflow: hidden;
+      animation: xff-radar-in 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+    [${RADAR_ATTR}]:hover { filter: brightness(1.08); }
+    [${RADAR_ATTR}][data-xff-radar-kind="busy"] {
+      background: ${RADAR_STEEL};
+      cursor: progress;
+      animation: xff-radar-pulse 1.1s ease-in-out infinite;
+    }
+    [${RADAR_ATTR}][data-xff-radar-kind="failed"] { background: ${RADAR_RED}; }
+    [${RADAR_ATTR}] [data-xff-radar-note] {
+      font-weight: 600;
+      opacity: 0.82;
+      font-size: 11px;
+    }
+    [${CARD_ATTR}] {
+      box-sizing: border-box;
+      margin: 0 16px 12px;
+      padding: 12px 14px;
+      border: 1px solid rgba(113, 118, 123, 0.35);
+      border-left: 3px solid ${RADAR_STEEL};
+      border-radius: 8px;
+      background: rgba(113, 118, 123, 0.08);
+      color: inherit;
+      font-family: inherit;
+      font-size: 13px;
+      line-height: 1.5;
+      animation: xff-card-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+    [${CARD_ATTR}] [data-xff-card-head] {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    [${CARD_ATTR}] [data-xff-card-rec] {
+      padding: 2px 8px;
+      border-radius: 4px;
+      color: ${RADAR_INK};
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }
+    [${CARD_ATTR}] [data-xff-card-meta] {
+      color: ${RADAR_STEEL};
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    [${CARD_ATTR}] [data-xff-card-summary] {
+      margin: 0 0 8px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    [${CARD_ATTR}] [data-xff-card-rows] {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 3px 10px;
+      margin-bottom: 10px;
+      font-size: 12.5px;
+    }
+    [${CARD_ATTR}] [data-xff-card-key] {
+      color: ${RADAR_STEEL};
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    [${CARD_ATTR}] [data-xff-card-val] { min-width: 0; }
+    [${CARD_ATTR}] [data-xff-card-val][data-xff-card-warn] {
+      color: ${RADAR_RED};
+      font-weight: 700;
+    }
+    [${CARD_ATTR}] [data-xff-card-path] {
+      color: ${RADAR_STEEL};
+      font-size: 11.5px;
+    }
+    [${CARD_ATTR}] [data-xff-card-foot] {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    [${CARD_ATTR}] button {
+      flex: none;
+      padding: 5px 12px;
+      border: 1px solid transparent;
+      border-radius: 999px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 16px;
+    }
+    [${CARD_ATTR}] [data-xff-card-ingest] {
+      background: ${ER_SIGNAL};
+      color: ${RADAR_INK};
+    }
+    [${CARD_ATTR}] [data-xff-card-ingest]:disabled {
+      background: rgba(113, 118, 123, 0.3);
+      color: ${RADAR_STEEL};
+      cursor: default;
+    }
+    [${CARD_ATTR}] [data-xff-card-close] {
+      background: none;
+      border-color: rgba(113, 118, 123, 0.45);
+      color: ${RADAR_STEEL};
+    }
+    [${CARD_ATTR}] [data-xff-card-error] {
+      color: ${RADAR_RED};
+      font-weight: 600;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      [${RADAR_ATTR}], [${CARD_ATTR}] { animation: none; }
+      [${RADAR_ATTR}][data-xff-radar-kind="busy"] { animation: none; }
+    }
+  `;
+  document.documentElement.appendChild(style);
+  radarStylesInjected = true;
+}
+
+/** Click handler per badge, so re-painting never stacks listeners. */
+const radarHandlers = new WeakMap<HTMLElement, () => void>();
+
+const pct = (n: number) => `${Math.round(n * 100)}%`;
+
+/** Badge text and color for each state. */
+function radarFace(state: RadarBadgeState): { text: string; note: string; color: string } {
+  if (state.kind === 'busy') return { text: '⏳ 判定中…', note: '', color: RADAR_STEEL };
+  if (state.kind === 'failed') return { text: '⚠ 判定失败 · 重试', note: '', color: RADAR_RED };
+  if (state.kind === 'done') {
+    return {
+      text: `📥 ${RECOMMEND_LABELS[state.recommend]}`,
+      note: '',
+      color: RECOMMEND_COLORS[state.recommend],
+    };
+  }
+  return {
+    text: `📥 候选 · ${pct(state.signals.substantive)}`,
+    note: state.signals.primary >= RADAR_PRIMARY_FLOOR ? '一手' : '',
+    color: ER_SIGNAL,
+  };
+}
+
+/** One "页名 92% · path" row value, with the path dimmed. */
+function pageRefLine(ref: TriagePageRef): HTMLElement {
+  const span = document.createElement('span');
+  span.textContent = `${ref.page} ${pct(ref.prob)}`;
+  if (ref.path) {
+    const path = document.createElement('span');
+    path.setAttribute('data-xff-card-path', 'true');
+    path.textContent = ` · ${ref.path}`;
+    span.appendChild(path);
+  }
+  return span;
+}
+
+function cardRow(rows: HTMLElement, key: string, value: Node, warn = false) {
+  const k = document.createElement('span');
+  k.setAttribute('data-xff-card-key', 'true');
+  k.textContent = key;
+  const v = document.createElement('span');
+  v.setAttribute('data-xff-card-val', 'true');
+  if (warn) v.setAttribute('data-xff-card-warn', 'true');
+  v.appendChild(value);
+  rows.append(k, v);
+}
+
+/**
+ * Stack several refs in one value cell, one per line. A separator string won't
+ * do: HTML collapses runs of spaces, so "页 A 92% 页 B 74%" would read as one
+ * sentence — and each ref may already carry its own " · path" tail.
+ */
+function stackNodes(nodes: HTMLElement[]): DocumentFragment {
+  const frag = document.createDocumentFragment();
+  for (const node of nodes) {
+    node.style.display = 'block';
+    frag.appendChild(node);
+  }
+  return frag;
+}
+
+function textNode(text: string): Text {
+  return document.createTextNode(text);
+}
+
+/** The card body for a service that answered. */
+function buildVerdictCard(card: HTMLElement, result: Extract<TriageResult, { ok: true }>) {
+  const { verdict } = result;
+  const accent = RECOMMEND_COLORS[verdict.recommend];
+  card.style.borderLeftColor = accent;
+
+  const head = document.createElement('div');
+  head.setAttribute('data-xff-card-head', 'true');
+
+  const rec = document.createElement('span');
+  rec.setAttribute('data-xff-card-rec', 'true');
+  rec.style.background = accent;
+  rec.textContent = RECOMMEND_LABELS[verdict.recommend];
+
+  const value = document.createElement('span');
+  value.setAttribute('data-xff-card-meta', 'true');
+  const valueBits = [
+    `价值 L${verdict.value.level}`,
+    verdict.value.label,
+    `评分 ${verdict.value.score}`,
+    `置信 ${pct(verdict.value.confidence)}`,
+  ].filter(Boolean);
+  value.textContent = valueBits.join(' · ');
+
+  head.append(rec, value);
+  card.appendChild(head);
+
+  if (verdict.summary_zh) {
+    const summary = document.createElement('p');
+    summary.setAttribute('data-xff-card-summary', 'true');
+    summary.textContent = verdict.summary_zh;
+    card.appendChild(summary);
+  }
+
+  const rows = document.createElement('div');
+  rows.setAttribute('data-xff-card-rows', 'true');
+
+  if (verdict.redundant_with.length > 0) {
+    cardRow(rows, '冗余页', stackNodes(verdict.redundant_with.map(pageRefLine)));
+  }
+  if (verdict.contradicts.length > 0) {
+    cardRow(rows, '⚠ 矛盾页', stackNodes(verdict.contradicts.map(pageRefLine)), true);
+  }
+  if (verdict.links.length > 0) {
+    const links = verdict.links.map((l) => {
+      const span = document.createElement('span');
+      span.textContent = `${l.page} ${pct(l.prob)}${l.relation ? `（${l.relation}）` : ''}`;
+      return span;
+    });
+    cardRow(rows, '建议关联', stackNodes(links));
+  }
+  if (verdict.tags.length > 0) {
+    cardRow(rows, '建议标签', textNode(verdict.tags.map((t) => `#${t}`).join(' ')));
+  }
+  if (verdict.section) cardRow(rows, '归入章节', textNode(verdict.section));
+  cardRow(rows, '一手来源', textNode(pct(verdict.primary_source)));
+  if (rows.childElementCount > 0) card.appendChild(rows);
+
+  const foot = document.createElement('div');
+  foot.setAttribute('data-xff-card-foot', 'true');
+
+  const ingest = document.createElement('button');
+  ingest.setAttribute('data-xff-card-ingest', 'true');
+  ingest.type = 'button';
+  ingest.textContent = '入库队列';
+
+  const close = document.createElement('button');
+  close.setAttribute('data-xff-card-close', 'true');
+  close.type = 'button';
+  close.textContent = '收起';
+
+  const meta = document.createElement('span');
+  meta.setAttribute('data-xff-card-meta', 'true');
+  const usd = verdict.usage?.usd ?? 0;
+  meta.textContent =
+    `比对 ${verdict.candidates_considered} 页` +
+    (verdict.usage?.input_tokens ? ` · ${verdict.usage.input_tokens} tok` : '') +
+    (usd ? ` · $${usd.toFixed(5)}` : '');
+
+  foot.append(ingest, close, meta);
+  card.appendChild(foot);
+  return { ingest, close };
+}
+
+/** The card body for a service that never answered. */
+function buildErrorCard(card: HTMLElement, result: Extract<TriageResult, { ok: false }>) {
+  card.style.borderLeftColor = RADAR_RED;
+
+  const msg = document.createElement('p');
+  msg.setAttribute('data-xff-card-summary', 'true');
+  msg.setAttribute('data-xff-card-error', 'true');
+  msg.textContent = result.offline ? TRIAGE_OFFLINE_HINT : `判定失败：${result.error}`;
+  card.appendChild(msg);
+
+  if (result.offline && result.error) {
+    const detail = document.createElement('div');
+    detail.setAttribute('data-xff-card-meta', 'true');
+    detail.style.marginBottom = '10px';
+    detail.textContent = result.error;
+    card.appendChild(detail);
+  }
+
+  const foot = document.createElement('div');
+  foot.setAttribute('data-xff-card-foot', 'true');
+  const close = document.createElement('button');
+  close.setAttribute('data-xff-card-close', 'true');
+  close.type = 'button';
+  close.textContent = '收起';
+  foot.appendChild(close);
+  card.appendChild(foot);
+  return { close };
+}
 
 export const xAdapter: PlatformAdapter = {
   name: 'x',
@@ -682,5 +1061,97 @@ export const xAdapter: PlatformAdapter = {
     root.querySelectorAll(`[${ER_ATTR}]`).forEach((el) => el.remove());
     root.querySelectorAll(`[${ER_SLOT_ATTR}]`).forEach((el) => el.remove());
     hideTip();
+  },
+
+  radarBadge(node, state, onClick) {
+    ensureRadarStyles();
+
+    let badge = node.querySelector<HTMLButtonElement>(`:scope > [${RADAR_ATTR}]`);
+    if (!badge) {
+      badge = document.createElement('button');
+      badge.setAttribute(RADAR_ATTR, 'true');
+      badge.type = 'button';
+      // X's own click handler opens the post; this badge must not.
+      badge.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const handler = radarHandlers.get(badge!);
+        if (handler) handler();
+      });
+      // The badge is absolutely positioned inside the article.
+      if (getComputedStyle(node).position === 'static') node.style.position = 'relative';
+      node.appendChild(badge);
+    }
+    radarHandlers.set(badge, onClick);
+
+    const face = radarFace(state);
+    badge.dataset.xffRadarKind = state.kind;
+    badge.style.background = face.color;
+    badge.disabled = state.kind === 'busy';
+    badge.setAttribute('aria-label', face.text);
+    badge.replaceChildren();
+
+    const text = document.createElement('span');
+    text.textContent = face.text;
+    badge.appendChild(text);
+
+    if (face.note) {
+      const note = document.createElement('span');
+      note.setAttribute('data-xff-radar-note', 'true');
+      note.textContent = `· ${face.note}`;
+      badge.appendChild(note);
+    }
+  },
+
+  triageCard(node, result, actions) {
+    ensureRadarStyles();
+
+    node.querySelectorAll(`:scope > [${CARD_ATTR}]`).forEach((el) => el.remove());
+
+    const card = document.createElement('div');
+    card.setAttribute(CARD_ATTR, 'true');
+    // Clicks inside the card must not open the post.
+    card.addEventListener('click', (e) => e.stopPropagation());
+
+    let close: HTMLButtonElement;
+    if (result.ok) {
+      const built = buildVerdictCard(card, result);
+      close = built.close;
+      const { ingest } = built;
+      // One reusable error slot, so retrying never stacks messages.
+      const err = document.createElement('span');
+      err.setAttribute('data-xff-card-error', 'true');
+      ingest.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        err.remove();
+        ingest.disabled = true;
+        ingest.textContent = '入队中…';
+        const res = await actions.onIngest();
+        if (res.ok) {
+          ingest.textContent = `已入队 · 队列 ${res.count}`;
+          return;
+        }
+        ingest.disabled = false;
+        ingest.textContent = '重试入队';
+        err.textContent = res.error;
+        ingest.parentElement?.appendChild(err);
+      });
+    } else {
+      close = buildErrorCard(card, result).close;
+    }
+
+    close.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      card.remove();
+    });
+
+    node.appendChild(card);
+  },
+
+  clearRadar(root) {
+    root.querySelectorAll(`[${RADAR_ATTR}]`).forEach((el) => el.remove());
+    root.querySelectorAll(`[${CARD_ATTR}]`).forEach((el) => el.remove());
   },
 };
