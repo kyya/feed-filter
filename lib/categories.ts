@@ -117,7 +117,7 @@ export const CATEGORIES: CategoryDef[] = [
     label: '愤怒 / 引战',
     emoji: '🔥',
     description:
-      'Content designed to provoke anger or moral outrage, inflammatory hot takes, or ragebait.',
+      'Content whose main purpose is to provoke anger or moral outrage: attacks or contempt aimed at a person or group, dunking, or ragebait. A blunt or unpopular opinion stated without hostility is NOT this.',
   },
   {
     id: 'engagement',

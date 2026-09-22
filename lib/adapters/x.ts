@@ -737,6 +737,11 @@ export const xAdapter: PlatformAdapter = {
     const author = handleOf(node);
     if (!author || !cell.matches(CELL_SELECTOR)) return [node];
 
+    // On the author's own profile every cell is same-author, so the sibling
+    // walk below would swallow the whole page as one "thread". Skip it there.
+    const pageHandle = location.pathname.split('/')[1]?.toLowerCase() ?? '';
+    if (pageHandle === author) return [node];
+
     const cells: HTMLElement[] = [cell];
     const sameAuthorArticle = (sib: Element | null): HTMLElement | null => {
       if (!(sib instanceof HTMLElement) || !sib.matches(CELL_SELECTOR)) return null;
